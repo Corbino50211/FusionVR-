@@ -5,10 +5,9 @@ using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-using Photon.Voice.Fusion;
-
-using Fusion.VR.Player;
 using Fusion.VR.Cosmetics;
+using Fusion.VR.Networking;
+using Fusion.VR.Player;
 using Fusion.VR.Saving;
 
 namespace Fusion.VR
@@ -16,7 +15,10 @@ namespace Fusion.VR
     [DisallowMultipleComponent]
     public class FusionVRManager : MonoBehaviour
     {
+        private const string FusionVoiceClientTypeName = "Photon.Voice.Fusion.FusionVoiceClient";
+
         public static FusionVRManager Manager { get; private set; }
+        public static bool IsSessionOperationInProgress { get; private set; }
 
         [Header("Photon")]
         public string FusionAppId;
@@ -38,6 +40,7 @@ namespace Fusion.VR
         [Tooltip("AutoHostOrClient makes the first player the host and later players clients.")]
         public GameMode NetworkingMode = GameMode.AutoHostOrClient;
         public NetworkPrefabRef NetworkedPlayerPrefab;
+        [Tooltip("Prefab containing a NetworkRunner and FusionVRRunner. Photon Voice components are optional.")]
         public GameObject VoiceAndRunner;
         [Tooltip("Host migration is still experimental in this fork.")]
         public bool EnableHostMigration;
@@ -52,7 +55,7 @@ namespace Fusion.VR
         [NonSerialized]
         public NetworkRunner Runner;
         [NonSerialized]
-        public FusionVoiceClient VoiceClient;
+        public Component VoiceClient;
         [NonSerialized]
         public Dictionary<PlayerRef, NetworkObject> playerCache = new Dictionary<PlayerRef, NetworkObject>();
         [NonSerialized]
@@ -118,8 +121,6 @@ namespace Fusion.VR
 
             if (string.IsNullOrEmpty(VoiceAppId))
                 VoiceAppId = Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdVoice;
-
-            Debug.Log("FusionVR attempted to fill the manager's default references.", this);
         }
 
         private static void CheckForRig(FusionVRManager manager)
@@ -198,29 +199,29 @@ namespace Fusion.VR
                 return false;
             }
 
-            if (string.IsNullOrWhiteSpace(Manager.FusionAppId))
-            {
-                Debug.LogError("Please enter a Fusion App ID on FusionVRManager.", Manager);
+            if (!ValidateManagerForConnection())
                 return false;
-            }
 
-            if (Manager.VoiceAndRunner == null)
-            {
-                Debug.LogError("VoiceAndRunner prefab is not assigned on FusionVRManager.", Manager);
-                return false;
-            }
+            GameObject runnerObject = Instantiate(Manager.VoiceAndRunner);
+            runnerObject.name = $"{Manager.VoiceAndRunner.name} (Runtime)";
+            DontDestroyOnLoad(runnerObject);
 
-            GameObject voiceAndRunner = Instantiate(Manager.VoiceAndRunner);
-            DontDestroyOnLoad(voiceAndRunner);
-
-            NetworkRunner runner = voiceAndRunner.GetComponent<NetworkRunner>();
+            NetworkRunner runner = runnerObject.GetComponent<NetworkRunner>();
             if (runner == null)
             {
-                Debug.LogError("The VoiceAndRunner prefab does not contain a NetworkRunner.", voiceAndRunner);
-                Destroy(voiceAndRunner);
+                Debug.LogError("The runner prefab does not contain a NetworkRunner.", runnerObject);
+                Destroy(runnerObject);
                 return false;
             }
 
+            FusionVRRunner callbacks = runnerObject.GetComponent<FusionVRRunner>();
+            if (callbacks == null)
+            {
+                callbacks = runnerObject.AddComponent<FusionVRRunner>();
+                Debug.LogWarning("FusionVRRunner was missing from the runner prefab and was added at runtime.", runnerObject);
+            }
+
+            runner.AddCallbacks(callbacks);
             NetworkProjectConfig.Global.Simulation.HostMigration = Manager.EnableHostMigration;
 
             Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdFusion = Manager.FusionAppId;
@@ -229,16 +230,59 @@ namespace Fusion.VR
 
             Manager.Runner = runner;
             Manager.Runner.ProvideInput = true;
-            Manager.VoiceClient = string.IsNullOrWhiteSpace(Manager.VoiceAppId)
-                ? null
-                : voiceAndRunner.GetComponent<FusionVoiceClient>();
+            Manager.VoiceClient = FindOptionalVoiceClient(runnerObject);
 
-            Debug.Log("FusionVR runner created.", voiceAndRunner);
+            if (!string.IsNullOrWhiteSpace(Manager.VoiceAppId) && Manager.VoiceClient == null)
+            {
+                Debug.LogWarning(
+                    "A Voice App ID is assigned, but FusionVoiceClient is not installed or is missing from the runner prefab. " +
+                    "Fusion networking will continue without voice.",
+                    runnerObject
+                );
+            }
+
+            Debug.Log("FusionVR runner created.", runnerObject);
 
             if (joinDefaultRoom)
                 _ = JoinRandomRoom(Manager.DefaultQueue, Manager.DefaultRoomLimit);
 
             return true;
+        }
+
+        private static bool ValidateManagerForConnection()
+        {
+            if (string.IsNullOrWhiteSpace(Manager.FusionAppId))
+            {
+                Debug.LogError("Please enter a Fusion App ID on FusionVRManager.", Manager);
+                return false;
+            }
+
+            if (Manager.VoiceAndRunner == null)
+            {
+                Debug.LogError("The runner prefab is not assigned on FusionVRManager.", Manager);
+                return false;
+            }
+
+            if (Manager.Head == null || Manager.LeftHand == null || Manager.RightHand == null)
+            {
+                Debug.LogError("Assign the local Head, LeftHand, and RightHand transforms before connecting.", Manager);
+                return false;
+            }
+
+            return true;
+        }
+
+        private static Component FindOptionalVoiceClient(GameObject runnerObject)
+        {
+            Component[] components = runnerObject.GetComponents<Component>();
+
+            foreach (Component component in components)
+            {
+                if (component != null && component.GetType().FullName == FusionVoiceClientTypeName)
+                    return component;
+            }
+
+            return null;
         }
 
         public static void SetUsername(string playerName)
@@ -317,7 +361,7 @@ namespace Fusion.VR
         /// </summary>
         public static bool Disconnect()
         {
-            if (Manager == null || Manager.Runner == null)
+            if (Manager == null || Manager.Runner == null || IsSessionOperationInProgress)
                 return false;
 
             _ = LeaveRoomAsync();
@@ -358,7 +402,7 @@ namespace Fusion.VR
 
         private static async Task<bool> StartSession(string sessionName, string queue, int maxPlayers)
         {
-            if (Manager == null)
+            if (Manager == null || IsSessionOperationInProgress)
                 return false;
 
             if (Manager.Runner == null && !Connect(false))
@@ -370,81 +414,119 @@ namespace Fusion.VR
                 return false;
             }
 
-            Dictionary<string, SessionProperty> roomProperties = new Dictionary<string, SessionProperty>
-            {
-                ["version"] = Application.version
-            };
+            IsSessionOperationInProgress = true;
+            NetworkRunner runner = Manager.Runner;
 
-            if (!string.IsNullOrWhiteSpace(queue))
-                roomProperties["queue"] = queue;
-
-            NetworkSceneManagerDefault sceneManager =
-                Manager.Runner.GetComponent<NetworkSceneManagerDefault>() ??
-                Manager.Runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
-
-            StartGameArgs args = new StartGameArgs
+            try
             {
-                GameMode = Manager.NetworkingMode,
-                SessionName = string.IsNullOrWhiteSpace(sessionName) ? null : sessionName,
-                SessionProperties = roomProperties,
-                PlayerCount = Mathf.Clamp(maxPlayers, 1, 100),
-                SceneManager = sceneManager,
-                IsOpen = true,
-                IsVisible = true
-            };
+                Dictionary<string, SessionProperty> roomProperties = new Dictionary<string, SessionProperty>
+                {
+                    ["version"] = Application.version
+                };
 
-            Scene activeScene = SceneManager.GetActiveScene();
-            if (activeScene.buildIndex >= 0)
-            {
-                NetworkSceneInfo sceneInfo = new NetworkSceneInfo();
-                sceneInfo.AddSceneRef(SceneRef.FromIndex(activeScene.buildIndex), LoadSceneMode.Single);
-                args.Scene = sceneInfo;
-            }
-            else
-            {
-                Debug.LogWarning(
-                    $"Scene '{activeScene.name}' is not in Build Settings. Scene NetworkObjects will not be registered."
+                if (!string.IsNullOrWhiteSpace(queue))
+                    roomProperties["queue"] = queue;
+
+                NetworkSceneManagerDefault sceneManager =
+                    runner.GetComponent<NetworkSceneManagerDefault>() ??
+                    runner.gameObject.AddComponent<NetworkSceneManagerDefault>();
+
+                StartGameArgs args = new StartGameArgs
+                {
+                    GameMode = Manager.NetworkingMode,
+                    SessionName = string.IsNullOrWhiteSpace(sessionName) ? null : sessionName,
+                    SessionProperties = roomProperties,
+                    PlayerCount = Mathf.Clamp(maxPlayers, 1, 100),
+                    SceneManager = sceneManager,
+                    IsOpen = true,
+                    IsVisible = true
+                };
+
+                Scene activeScene = SceneManager.GetActiveScene();
+                if (activeScene.buildIndex >= 0)
+                {
+                    NetworkSceneInfo sceneInfo = new NetworkSceneInfo();
+                    sceneInfo.AddSceneRef(SceneRef.FromIndex(activeScene.buildIndex), LoadSceneMode.Single);
+                    args.Scene = sceneInfo;
+                }
+                else
+                {
+                    Debug.LogWarning(
+                        $"Scene '{activeScene.name}' is not in Build Settings. Scene NetworkObjects will not be registered."
+                    );
+                }
+
+                runner.ProvideInput = true;
+                StartGameResult result = await runner.StartGame(args);
+
+                if (!result.Ok)
+                {
+                    Debug.LogError($"FusionVR failed to start session: {result.ShutdownReason}");
+                    DestroyRunner(runner);
+                    return false;
+                }
+
+                Debug.Log(
+                    string.IsNullOrWhiteSpace(sessionName)
+                        ? $"FusionVR joined public queue '{queue}' as {runner.GameMode}."
+                        : $"FusionVR joined room '{sessionName}' as {runner.GameMode}."
                 );
+
+                return true;
             }
-
-            Manager.Runner.ProvideInput = true;
-            StartGameResult result = await Manager.Runner.StartGame(args);
-
-            if (!result.Ok)
+            catch (Exception exception)
             {
-                Debug.LogError($"FusionVR failed to start session: {result.ShutdownReason}");
+                Debug.LogException(exception);
+                DestroyRunner(runner);
                 return false;
             }
-
-            Debug.Log(
-                string.IsNullOrWhiteSpace(sessionName)
-                    ? $"FusionVR joined public queue '{queue}' as {Manager.Runner.GameMode}."
-                    : $"FusionVR joined room '{sessionName}' as {Manager.Runner.GameMode}."
-            );
-
-            return true;
+            finally
+            {
+                IsSessionOperationInProgress = false;
+            }
         }
 
         public static void LeaveRoom()
         {
-            _ = LeaveRoomAsync();
+            if (!IsSessionOperationInProgress)
+                _ = LeaveRoomAsync();
         }
 
         public static async Task LeaveRoomAsync()
         {
-            if (Manager == null || Manager.Runner == null)
+            if (Manager == null || Manager.Runner == null || IsSessionOperationInProgress)
                 return;
 
+            IsSessionOperationInProgress = true;
             NetworkRunner runner = Manager.Runner;
 
-            if (runner.IsRunning)
-                await runner.Shutdown(shutdownReason: ShutdownReason.Ok);
-            else
+            try
+            {
+                if (runner.IsRunning)
+                    await runner.Shutdown(shutdownReason: ShutdownReason.Ok);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+            finally
+            {
+                DestroyRunner(runner);
+                IsSessionOperationInProgress = false;
+            }
+        }
+
+        private static void DestroyRunner(NetworkRunner runner)
+        {
+            if (Manager != null && Manager.Runner == runner)
             {
                 Manager.Runner = null;
                 Manager.VoiceClient = null;
-                Destroy(runner.gameObject);
+                Manager.playerCache.Clear();
             }
+
+            if (runner != null)
+                Destroy(runner.gameObject);
         }
 
         public static string GenerateRoomCode()
