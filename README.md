@@ -1,107 +1,157 @@
 ![FusionVRLogoNoBackSmall](https://github.com/fchb1239/FusionVR/assets/29258204/48221303-cec0-47b9-bc0e-d129bba3dbcc)
 
-A Unity Package containing all the necessary components to do VR networking with [Photon Fusion](https://www.photonengine.com/fusion)
+# FusionVR — Fusion 2 Community Fork
 
-NOTE: FusionVR is still in beta, bugs, issues, unfinished features and such are to be expected.
-NOTE: This currently only support Fusion V1, however it will be updated to exclusively support Fusion V2.
+A lightweight Unity VR networking framework built on Photon Fusion.
 
-[![Download](https://img.shields.io/badge/Download-blue.svg)](https://github.com/fchb1239/FusionVR/releases/tag/1.0.0)
-[![Discord](https://img.shields.io/badge/Discord-blue.svg)](https://discord.gg/rRvnU846Bf)
+This repository is a fork of the original FusionVR project by **fchb1239**. The `fusion2-port` branch is being updated for Photon Fusion 2 and Unity 6, with a focus on host-authoritative co-op VR games.
 
-![FusionPreview1](https://github.com/fchb1239/FusionVR/assets/29258204/dd51f353-cbea-4947-896f-da7525317d4f)
+> **Status:** active development. The Fusion 2 port has not completed its first full Unity compile and two-instance networking test yet. Keep production projects on a pinned commit until a tested release is tagged.
 
-# Documentation
-The recommended Unity version is [2021.3.25.1](https://unity.com/releases/editor/whats-new/2021.3.25).
+## Current target
 
-You need the [Photon Fusion SDK](https://doc.photonengine.com/fusion/v1/getting-started/sdk-download) and [Photon Voice](https://assetstore.unity.com/packages/tools/audio/photon-voice-2-130518) installed to proceed.
+- Unity 6
+- Photon Fusion 2.1
+- `GameMode.AutoHostOrClient`
+- Six players by default
+- Networked head and hands
+- Public queues and private room codes
+- Player names, colours, and cosmetics
+- Optional Photon Voice integration
 
-If you are having trouble with Voice, please read [Fusion Voice Intergration Docs](https://doc.photonengine.com/voice/current/getting-started/voice-for-fusion)
+## Major Fusion 2 changes
 
-Start off by finding the player in the [Resources folder](https://docs.unity3d.com/Manual/BestPracticeUnderstandingPerformanceInUnity6.html), press on it and you'll be met with this dialog.
+The port currently includes:
 
-![image](https://github.com/fchb1239/FusionVR/assets/29258204/23ebf9d5-6833-42b6-b637-5f19e063af91)
+- Fusion 2 `INetworkRunnerCallbacks` signatures
+- Fusion 2 network-property change callbacks
+- Host-authoritative player spawning
+- `SetPlayerObject` registration
+- VR pose input supplied every network tick
+- Fusion 2 `NetworkTransform` teleport calls
+- Fresh runner creation after shutdown or failed connection
+- Duplicate session-operation protection
+- Automatic runner callback registration
+- Optional Voice detection without a hard compile dependency
 
-Press Import TMP Essentials.
+## Installation
 
-After that navigate to Resources/FusionVR/Prefabs.
+Read [FUSION2_SETUP.md](FUSION2_SETUP.md) before importing the framework.
 
-![image](https://github.com/fchb1239/FusionVR/assets/29258204/0f1e3eed-0852-48bb-859e-db4b7051fe1d)
+The important order is:
 
-Then drag FusionVRManager into your scene. There should only be 1 manager in the entire game. The manager will therefore mark itself your player as "DontDestroyOnLoad".
-The manager will automatically attempt to fill out the required fields
+1. Import Photon Fusion 2.1.
+2. Confirm Fusion compiles by itself.
+3. Import this fork.
+4. Run the networking-only test.
+5. Install the matching Photon Voice integration afterward, if needed.
 
-![image](https://github.com/fchb1239/FusionVR/assets/29258204/b65946cd-4a84-4203-abd6-67b6ab59eae1)
+Do not import an older standalone Photon Realtime package over Fusion 2.1.
 
-Including Fusion.VR
-```cs
-using Fusion.VR
+## Basic use
+
+```csharp
+using Fusion.VR;
 ```
 
-Connecting to servers
-```
+### Connect and join the default queue
+
+```csharp
 FusionVRManager.Connect();
 ```
 
-Joining rooms
-```cs
-// It will only join people on the same queue but the room codes themselves are random
-string queue = "Space";
-// Optional
-int maxPlayers = 100;
-FusionVRManager.JoinRandomRoom(queue, maxPlayers);
+### Join a public queue
+
+```csharp
+bool joined = await FusionVRManager.JoinRandomRoom("Warehouse", 6);
 ```
 
-Joining private rooms
-```cs
-string roomCode = "1234";
-// Optional
-int maxPlayers = 100;
-FusionVRManager.JoinPrivateRoom(roomCode, maxPlayers);
+Players only match with sessions using the same application version and queue property.
+
+### Join a private room
+
+```csharp
+bool joined = await FusionVRManager.JoinPrivateRoom("48291", 6);
 ```
 
-Leaving the current room
-```cs
-FusionVRManager.LeaveRoom();
+### Leave
+
+```csharp
+await FusionVRManager.LeaveRoomAsync();
 ```
 
-Setting name
-```cs
-FusionVRManager.SetUsername("fchb1239");
+### Player settings
+
+```csharp
+FusionVRManager.SetUsername("Worker");
+FusionVRManager.SetColour(Color.blue);
 ```
 
-Setting colour
-```cs
-Color myColour = new Color(0, 0, 1);
-FusionVRManager.SetColour(myColour);
+### Cosmetics
+
+```csharp
+FusionVRManager.SetCosmetics("Head", "HardHat");
 ```
 
-# Cosmetics
-Cosmetics in Fusion VR Work differently to [Photon VR](https://github.com/fchb1239/PhotonVR).
-In Fusion, cosmetics are stored as a dictionary, with the slot name, and the cosmetic name.
+Or set multiple slots:
 
-Start off by locating "Cosmetic Slots" on the manager.
-![image](https://github.com/fchb1239/FusionVR/assets/29258204/b2a1e88e-fe9e-43bb-a4d6-1b74d5a21506)
-Here you can add or remove slots.
+```csharp
+Dictionary<string, string> cosmetics = new Dictionary<string, string>
+{
+    ["Head"] = "HardHat",
+    ["Face"] = "SafetyGlasses"
+};
 
-Navigate to the player in Resources/FusionVR, here you can add the cosmetic slot parents.
-![image](https://github.com/fchb1239/FusionVR/assets/29258204/75f17d20-e278-4d96-b8e8-c6141cc14202)
-A cosmetic slot parent, is the parent of all the comsetics in that slot.
-Under a parent, you make the cosmetics. Set the GameObject/cosmetic name to something under 32 characters.
-
-Enabling a cosmetic
-```cs
-string SlotName = "Head";
-string CosmeticName = "VRTopHat"; // VRTopHat is one of the 4 default cosmetics
-FusionVRManager.SetCosmetics(SlotName, CosmeticName);
+FusionVRManager.SetCosmetics(cosmetics);
 ```
 
-Enabling a list cosmetic
-```cs
-Dictionary<string, string> Cosmetics = new Dictionary<string, string>();
-Cosmetics.Add("Head", "VRTopHat");
-Cosmetics.Add("Face", "VRSunglasses");
-FusionVRManager.SetCosmetics(Cosmetics);
-```
+Cosmetic slot names are limited to 16 characters and cosmetic object names are limited to 32 characters by the current networked types.
 
-Small note: Some functions are async, they may cause warnings but don't worry about them. If you have your own async function, you can await them.
-Have fun devs!
+## Required scene references
+
+The scene must contain exactly one `FusionVRManager` with:
+
+- Fusion App ID
+- Local XR head transform
+- Local left-hand transform
+- Local right-hand transform
+- Runner prefab
+- Registered networked player prefab
+
+The runner prefab requires `NetworkRunner`. `FusionVRRunner` is recommended on the prefab and is added automatically at runtime if missing.
+
+Photon Voice components are optional. When a Voice App ID is assigned but no `FusionVoiceClient` is found, FusionVR warns and continues with networking only.
+
+## First test goal
+
+Before adding locomotion or grabbing, verify that:
+
+1. One instance starts as host.
+2. A second instance joins as client.
+3. Both players see synchronized head and hand poses.
+4. Either player can leave.
+5. A fresh runner can reconnect without restarting the application.
+
+## Roadmap
+
+- [x] Initial Fusion 2 API port
+- [x] Optional Voice dependency
+- [x] Runner lifecycle cleanup
+- [ ] Clean Unity 6 compile
+- [ ] Two-instance head/hand synchronization test
+- [ ] Joystick locomotion
+- [ ] Snap and smooth turning
+- [ ] Networked one-hand grabbing
+- [ ] Two-player heavy-object carrying
+- [ ] Host-authoritative physics objects
+- [ ] Tested tagged release
+
+## Contributing
+
+Keep Fusion 2 work on feature branches and open pull requests into `main`. Include the Unity version, Fusion version, and exact Console errors when reporting a bug.
+
+## Credit and license
+
+Original FusionVR framework by **fchb1239**.
+
+This fork retains the original [MIT License](LICENSE) and copyright notice.
