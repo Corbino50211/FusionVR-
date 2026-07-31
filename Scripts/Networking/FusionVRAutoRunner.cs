@@ -1,4 +1,5 @@
 using Fusion;
+using Fusion.VR;
 using UnityEngine;
 
 namespace Fusion.VR.Networking
