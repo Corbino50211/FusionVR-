@@ -35,8 +35,8 @@ namespace Fusion.VR
         [Header("Networking")]
         public string DefaultQueue = "Default";
         public int DefaultRoomLimit = 6;
-        [Tooltip("AutoClientOrHost makes the first player the host and later players clients.")]
-        public GameMode NetworkingMode = GameMode.AutoClientOrHost;
+        [Tooltip("AutoHostOrClient makes the first player the host and later players clients.")]
+        public GameMode NetworkingMode = GameMode.AutoHostOrClient;
         public NetworkPrefabRef NetworkedPlayerPrefab;
         public GameObject VoiceAndRunner;
         [Tooltip("Host migration is still experimental in this fork.")]
@@ -221,9 +221,7 @@ namespace Fusion.VR
                 return false;
             }
 
-            NetworkProjectConfig.Global.EnableHostMigration = Manager.EnableHostMigration;
-            if (Manager.EnableHostMigration)
-                NetworkProjectConfig.Global.HostMigrationSnapshotInterval = 5;
+            NetworkProjectConfig.Global.Simulation.HostMigration = Manager.EnableHostMigration;
 
             Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdFusion = Manager.FusionAppId;
             Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdVoice = Manager.VoiceAppId;
