@@ -10,6 +10,7 @@ GameObject:
   m_Component:
   - component: {fileID: 9218801851093528434}
   - component: {fileID: 9218801851093528445}
+  - component: {fileID: 9218801851093528446}
   m_Layer: 0
   m_Name: FusionVRManager
   m_TagString: Untagged
@@ -66,3 +67,15 @@ MonoBehaviour:
   - RightHand
   ConnectOnAwake: 1
   JoinRoomOnConnect: 1
+--- !u!114 &9218801851093528446
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 9218801851093528444}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b42a60962ef94f73904cd17e52b766fa, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
