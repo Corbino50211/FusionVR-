@@ -2,6 +2,7 @@
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using FusionVRManager = Fusion.VR.FusionVRManager;
 
 namespace Fusion.VR.Editor
 {
