@@ -1,6 +1,6 @@
 {
   "name": "com.corbino50211.fusionvr",
-  "version": "0.2.0-preview.1",
+  "version": "0.2.0-preview.2",
   "displayName": "FusionVR Community Fork",
   "description": "A Photon Fusion 2 VR networking framework with networked head and hand tracking, rooms, player appearance, and optional Photon Voice integration.",
   "unity": "6000.0",
