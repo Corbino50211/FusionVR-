@@ -25,7 +25,7 @@ namespace Fusion.VR.Networking
                 GameMode.Host => runner.IsServer,
                 GameMode.Server => runner.IsServer,
                 GameMode.Client => runner.IsServer,
-                GameMode.AutoClientOrHost => runner.IsServer,
+                GameMode.AutoHostOrClient => runner.IsServer,
                 GameMode.Single => runner.IsServer,
                 _ => false
             };
@@ -126,7 +126,7 @@ namespace Fusion.VR.Networking
         {
             await runner.Shutdown(shutdownReason: ShutdownReason.HostMigration);
 
-            if (!FusionVRManager.Connect())
+            if (!FusionVRManager.Connect(false))
             {
                 Debug.LogError("FusionVR: failed to create a runner for host migration");
                 return;
