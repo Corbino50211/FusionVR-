@@ -1,10 +1,8 @@
-using System;
-using System.Collections;
 using System.Collections.Generic;
+
 using UnityEngine;
 
 using Fusion;
-using Fusion.VR;
 using Fusion.VR.Cosmetics;
 
 using TMPro;
@@ -37,104 +35,142 @@ namespace Fusion.VR.Player
         [Header("Other")]
         public TextMeshPro NameText;
         public bool HideLocalName = true;
-        public bool HideLocalPlayer = false;
+        public bool HideLocalPlayer;
 
-        [Header("Networked Variables")]
-        public bool isLocalPlayer;  // Not exactly networked, but you can't make a stupid header without a regular stupid variable
-        [Networked(OnChanged = nameof(OnNickNameChanged))]
-        public NetworkString<_32> NickName { get; set; } // I feel as if nobody is going to have their name over 32 characters, feel free to change it though
-        [Networked(OnChanged = nameof(OnColourChanged))]
+        [Header("Runtime")]
+        public bool isLocalPlayer;
+
+        [Networked, OnChangedRender(nameof(OnNickNameChanged))]
+        public NetworkString<_32> NickName { get; set; }
+
+        [Networked, OnChangedRender(nameof(OnColourChanged))]
         public Color Colour { get; set; }
-        [Networked(OnChanged = nameof(OnCosmeticsChanged)), Capacity(10)] // Default is max 10, because beyond that the game would probably start lagging
+
+        [Networked, OnChangedRender(nameof(OnCosmeticsChanged)), Capacity(10)]
         public NetworkDictionary<NetworkString<_16>, NetworkString<_32>> Cosmetics => default;
 
         public override void Spawned()
         {
+            PlayerId = Object.InputAuthority.PlayerId;
+
             if (Object.HasInputAuthority)
             {
                 localPlayer = this;
                 isLocalPlayer = true;
+
+                if (NameText != null)
+                    NameText.gameObject.SetActive(!HideLocalName);
+
+                SetLocalAvatarVisible(!HideLocalPlayer);
                 FusionVRManager.LoadPlayer();
-
-                NameText.gameObject.SetActive(!HideLocalName);
-
-                Head.gameObject.SetActive(!HideLocalPlayer);
-                Body.gameObject.SetActive(!HideLocalPlayer);
-                LeftHand.gameObject.SetActive(!HideLocalPlayer);
-                RightHand.gameObject.SetActive(!HideLocalPlayer);
             }
+
+            // OnChangedRender is not called for the object's initial state.
+            OnNickNameChanged();
+            OnColourChanged();
+            OnCosmeticsChanged();
         }
 
         private void Update()
         {
-            // Check if this is the local player
-            if (Object.HasInputAuthority)
-            {
-                // Move the objects locally
-                // Head
-                HeadTransform.transform.position = FusionVRManager.Manager.Head.position;
-                HeadTransform.transform.rotation = FusionVRManager.Manager.Head.rotation;
-                // Left hand
-                LeftHandTransform.transform.position = FusionVRManager.Manager.LeftHand.position;
-                LeftHandTransform.transform.rotation = FusionVRManager.Manager.LeftHand.rotation;
-                // Right hand
-                RightHandTransform.transform.position = FusionVRManager.Manager.RightHand.position;
-                RightHandTransform.transform.rotation = FusionVRManager.Manager.RightHand.rotation;
-            }
+            if (!Object.HasInputAuthority || FusionVRManager.Manager == null)
+                return;
+
+            FusionVRManager manager = FusionVRManager.Manager;
+
+            if (manager.Head != null && HeadTransform != null)
+                HeadTransform.transform.SetPositionAndRotation(manager.Head.position, manager.Head.rotation);
+
+            if (manager.LeftHand != null && LeftHandTransform != null)
+                LeftHandTransform.transform.SetPositionAndRotation(manager.LeftHand.position, manager.LeftHand.rotation);
+
+            if (manager.RightHand != null && RightHandTransform != null)
+                RightHandTransform.transform.SetPositionAndRotation(manager.RightHand.position, manager.RightHand.rotation);
         }
 
         public override void FixedUpdateNetwork()
         {
-            if (!Object.HasInputAuthority)
-            {
-                if (GetInput(out FusionVRNetworkedPlayerData data))
-                {
-                    HeadTransform.TeleportToPositionRotation(data.headPosition, data.headRotation);
-                    LeftHandTransform.TeleportToPositionRotation(data.leftHandPosition, data.leftHandRotation);
-                    RightHandTransform.TeleportToPositionRotation(data.rightHandPosition, data.rightHandRotation);
+            // In Host/Server mode, the state authority consumes the client's input and
+            // writes it into the NetworkTransforms. Proxies receive the replicated result.
+            if (!Object.HasStateAuthority || Object.HasInputAuthority)
+                return;
 
-                    //Debug.Log(data.ToString());
-                }
+            if (!GetInput(out FusionVRNetworkedPlayerData data))
+                return;
+
+            HeadTransform?.Teleport(data.headPosition, data.headRotation);
+            LeftHandTransform?.Teleport(data.leftHandPosition, data.leftHandRotation);
+            RightHandTransform?.Teleport(data.rightHandPosition, data.rightHandRotation);
+        }
+
+        private void SetLocalAvatarVisible(bool visible)
+        {
+            if (Head != null)
+                Head.gameObject.SetActive(visible);
+
+            if (Body != null)
+                Body.gameObject.SetActive(visible);
+
+            if (LeftHand != null)
+                LeftHand.gameObject.SetActive(visible);
+
+            if (RightHand != null)
+                RightHand.gameObject.SetActive(visible);
+        }
+
+        private void OnNickNameChanged()
+        {
+            string playerName = NickName.ToString();
+
+            if (NameText != null)
+                NameText.text = playerName;
+
+            gameObject.name = string.IsNullOrWhiteSpace(playerName)
+                ? $"Player ({PlayerId})"
+                : $"Player ({playerName})";
+        }
+
+        private void OnColourChanged()
+        {
+            foreach (Renderer targetRenderer in renderers)
+            {
+                if (targetRenderer != null)
+                    targetRenderer.material.color = Colour;
             }
         }
 
-        public static void OnNickNameChanged(Changed<FusionVRPlayer> changed)
+        private void OnCosmeticsChanged()
         {
-            changed.Behaviour.NameText.text = changed.Behaviour.NickName.Value;
-            changed.Behaviour.gameObject.name = $"Player ({changed.Behaviour.NickName.Value})";
-        }
-
-        public static void OnColourChanged(Changed<FusionVRPlayer> changed)
-        {
-            List<Renderer> renderers = changed.Behaviour.renderers;
-            foreach (Renderer renderer in renderers)
+            foreach (PlayerCosmeticSlot slot in cosmeticSlots)
             {
-                renderer.material.color = changed.Behaviour.Colour;
-            }
-        }
+                if (slot == null)
+                    continue;
 
-        public static void OnCosmeticsChanged(Changed<FusionVRPlayer> changed)
-        {
-            List<PlayerCosmeticSlot> slots = changed.Behaviour.cosmeticSlots;
+                string selectedCosmetic = string.Empty;
 
-            // Foreach, foreach, foreach, foreach!! We love foreach!!
-            foreach (KeyValuePair<NetworkString<_16>, NetworkString<_32>> cosmetic in changed.Behaviour.Cosmetics)
-            {
-                foreach (PlayerCosmeticSlot slot in slots)
+                foreach (KeyValuePair<NetworkString<_16>, NetworkString<_32>> cosmetic in Cosmetics)
                 {
-                    if (cosmetic.Key == slot.SlotName)
+                    if (cosmetic.Key.ToString() == slot.SlotName)
                     {
-                        foreach (Transform t in slot.Slot)
-                        {
-                            GameObject obj = t.gameObject;
-                            obj.SetActive(obj.name == cosmetic.Value);
-
-                            if (t.GetComponentInChildren<Collider>() != null)
-                            {
-                                Debug.LogWarning($"It is not recommended to have a collider on a cosmetic ({obj.name})");
-                            }
-                        }
+                        selectedCosmetic = cosmetic.Value.ToString();
                         break;
+                    }
+                }
+
+                foreach (Transform cosmeticTransform in slot.Slot)
+                {
+                    if (cosmeticTransform == null)
+                        continue;
+
+                    GameObject cosmeticObject = cosmeticTransform.gameObject;
+                    cosmeticObject.SetActive(cosmeticObject.name == selectedCosmetic);
+
+                    if (cosmeticTransform.GetComponentInChildren<Collider>(true) != null)
+                    {
+                        Debug.LogWarning(
+                            $"It is not recommended to have a collider on cosmetic '{cosmeticObject.name}'.",
+                            cosmeticObject
+                        );
                     }
                 }
             }
@@ -155,13 +191,14 @@ namespace Fusion.VR.Player
         [Rpc(RpcSources.InputAuthority, RpcTargets.StateAuthority)]
         public void RPCSetCosmetics(CosmeticSlot[] cosmetics, RpcInfo info = default)
         {
-            int i = 0;
-            foreach (CosmeticSlot cos in cosmetics)
+            Cosmetics.Clear();
+
+            foreach (CosmeticSlot cosmetic in cosmetics)
             {
-                if (i < Cosmetics.Capacity)
-                {
-                    Cosmetics.Set(cos.SlotName, cos.CosmeticName);
-                }
+                if (Cosmetics.Count >= Cosmetics.Capacity)
+                    break;
+
+                Cosmetics.Set(cosmetic.SlotName, cosmetic.CosmeticName);
             }
         }
     }

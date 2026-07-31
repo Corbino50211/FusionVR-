@@ -4,119 +4,122 @@ using System.Threading.Tasks;
 
 using UnityEngine;
 
-using Photon.Voice.Fusion;
-
-using Fusion.VR.Player;
 using Fusion.VR.Cosmetics;
+using Fusion.VR.Networking;
+using Fusion.VR.Player;
 using Fusion.VR.Saving;
 
 namespace Fusion.VR
 {
+    /// <summary>
+    /// Central runtime manager for the FusionVR community fork.
+    /// Uses the Fusion App ID configured through Fusion Hub and creates a runner at runtime.
+    /// </summary>
+    [DisallowMultipleComponent]
     public class FusionVRManager : MonoBehaviour
     {
+        private const string FusionVoiceClientTypeName = "Photon.Voice.Fusion.FusionVoiceClient";
+
         public static FusionVRManager Manager { get; private set; }
+        public static bool IsSessionOperationInProgress { get; private set; }
+        public static Action<NetworkRunner> OnHostMigrationResume;
 
         [Header("Photon")]
+        [Tooltip("Informational only in Fusion 2.1. Configure the real App ID in Tools > Fusion > Fusion Hub.")]
         public string FusionAppId;
-        public string VoiceAppId;
-        [Tooltip("Please read https://doc.photonengine.com/en-us/pun/current/connection-and-authentication/regions for more information.\nLeave this empty to default to the nearest region for the player.")]
-        public string Region = "eu";
 
-        [Header("Player")]
+        [Tooltip("Optional. Voice is not required for networking tests.")]
+        public string VoiceAppId;
+
+        [Tooltip("Leave empty to let Photon choose the best region automatically.")]
+        public string Region = string.Empty;
+
+        [Header("Local XR Rig")]
         public Transform Head;
         public Transform LeftHand;
         public Transform RightHand;
         public Color Colour = Color.black;
-        [Tooltip("If left as nothing, there will be no default username")]
-        public string DefaultUsername = "Player";
+        public string DefaultUsername = "Worker";
 
         [Header("Networking")]
         public string DefaultQueue = "Default";
-        public int DefaultRoomLimit = 100; // We love Fusion
-        public GameMode NetworkingMode = GameMode.Shared; // P2P by default!!
+        public int DefaultRoomLimit = 6;
+        public GameMode NetworkingMode = GameMode.AutoHostOrClient;
         public NetworkPrefabRef NetworkedPlayerPrefab;
+
+        [Tooltip("Optional runner template. When empty, FusionVR creates the runner automatically.")]
         public GameObject VoiceAndRunner;
 
-        [Header("Other")]
-        public List<string> CosmeticSlots = new List<string>();
-        [Tooltip("If the user shall connect when this object has awoken")]
+        [Tooltip("Host migration is experimental in this fork.")]
+        public bool EnableHostMigration;
+
+        [Header("Player Appearance")]
+        public List<string> CosmeticSlots = new List<string>
+        {
+            "Head",
+            "Face",
+            "Body",
+            "LeftHand",
+            "RightHand"
+        };
+
+        [Header("Startup")]
         public bool ConnectOnAwake = true;
-        [Tooltip("If the user shall join a room when they connect")]
         public bool JoinRoomOnConnect = true;
 
-        [NonSerialized]
-        public NetworkRunner Runner;
-        [NonSerialized]
-        public FusionVoiceClient VoiceClient;
-        [NonSerialized]
-        public Dictionary<PlayerRef, NetworkObject> playerCache = new Dictionary<PlayerRef, NetworkObject>();
-        [NonSerialized]
-        public Dictionary<string, string> Cosmetics = new Dictionary<string, string>();
+        [NonSerialized] public NetworkRunner Runner;
+        [NonSerialized] public Component VoiceClient;
+        [NonSerialized] public Dictionary<PlayerRef, NetworkObject> playerCache = new Dictionary<PlayerRef, NetworkObject>();
+        [NonSerialized] public Dictionary<string, string> Cosmetics = new Dictionary<string, string>();
 
-        public static Action<NetworkRunner> OnHostMigrationResume;
+        private void Awake()
+        {
+            if (Manager != null && Manager != this)
+            {
+                Debug.LogError("There can only be one FusionVRManager in a scene.", this);
+                Destroy(gameObject);
+                return;
+            }
+
+            Manager = this;
+            DontDestroyOnLoad(gameObject);
+        }
 
         private void Start()
         {
-            if (Manager == null)
-                Manager = this;
-            else
-            {
-                Debug.LogError("There can't be multiple PhotonVRManagers in a scene");
-                Application.Quit();
-            }
-
-            DontDestroyOnLoad(Head.root);
-            DontDestroyOnLoad(gameObject);
+            LoadSavedLocalSettings();
 
             if (ConnectOnAwake)
                 Connect();
+        }
 
-            if (string.IsNullOrEmpty(PlayerPrefs.GetString("Username")) && !string.IsNullOrEmpty(DefaultUsername))
-                SetUsername(DefaultUsername + GenerateRoomCode()); // Reduce, reuse, recyle!!
-
-            if (!string.IsNullOrEmpty(PlayerPrefs.GetString("Colour")))
-                SetColour(JsonUtility.FromJson<Color>(PlayerPrefs.GetString("Colour")));
-
-            if (!string.IsNullOrEmpty(PlayerPrefs.GetString("Cosmetics")))
-                SetCosmetics(FusionVRPrefs.GetCosmetics(CosmeticSlots));
-
-            if (Cosmetics == null)
-                SetCosmetics(new Dictionary<string, string>());
-
-            /*
-            if (!string.IsNullOrEmpty(PlayerPrefs.GetString("Cosmetics")))
-                Cosmetics = JsonUtility.FromJson<PhotonVRCosmeticsData>(PlayerPrefs.GetString("Cosmetics"));
-            */
+        private void OnDestroy()
+        {
+            if (Manager == this)
+                Manager = null;
         }
 
 #if UNITY_EDITOR
+        /// <summary>
+        /// Attempts to locate common XR Origin head and controller transforms.
+        /// App IDs are configured through Fusion Hub in Fusion 2.1 and are not read here.
+        /// </summary>
         public void CheckDefaultValues()
         {
-            bool b = CheckForRig(this);
-            if (b)
-            {
-                if (string.IsNullOrEmpty(FusionAppId))
-                    FusionAppId = Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdFusion;
-
-                if (string.IsNullOrEmpty(VoiceAppId))
-                    VoiceAppId = Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdVoice;
-
-                Debug.Log("Attempted to set default values");
-            }
+            CheckForRig(this);
         }
 
-        private bool CheckForRig(FusionVRManager manager)
+        private static void CheckForRig(FusionVRManager manager)
         {
-            GameObject[] objects = FindObjectsOfType<GameObject>();
-
-            bool b = false;
+            GameObject[] objects = FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 
             if (manager.Head == null)
             {
-                b = true;
                 foreach (GameObject obj in objects)
                 {
-                    if (obj.name.Contains("Camera") || obj.name.Contains("Head"))
+                    if (obj.name.Contains("Main Camera", StringComparison.OrdinalIgnoreCase) ||
+                        obj.name.Equals("Camera", StringComparison.OrdinalIgnoreCase) ||
+                        obj.name.Contains("Head", StringComparison.OrdinalIgnoreCase))
                     {
                         manager.Head = obj.transform;
                         break;
@@ -126,10 +129,13 @@ namespace Fusion.VR
 
             if (manager.LeftHand == null)
             {
-                b = true;
                 foreach (GameObject obj in objects)
                 {
-                    if (obj.name.Contains("Left") && (obj.name.Contains("Hand") || obj.name.Contains("Controller")))
+                    bool isLeft = obj.name.Contains("Left", StringComparison.OrdinalIgnoreCase);
+                    bool isHand = obj.name.Contains("Hand", StringComparison.OrdinalIgnoreCase) ||
+                                  obj.name.Contains("Controller", StringComparison.OrdinalIgnoreCase);
+
+                    if (isLeft && isHand)
                     {
                         manager.LeftHand = obj.transform;
                         break;
@@ -139,301 +145,373 @@ namespace Fusion.VR
 
             if (manager.RightHand == null)
             {
-                b = true;
                 foreach (GameObject obj in objects)
                 {
-                    if (obj.name.Contains("Right") && (obj.name.Contains("Hand") || obj.name.Contains("Controller")))
+                    bool isRight = obj.name.Contains("Right", StringComparison.OrdinalIgnoreCase);
+                    bool isHand = obj.name.Contains("Hand", StringComparison.OrdinalIgnoreCase) ||
+                                  obj.name.Contains("Controller", StringComparison.OrdinalIgnoreCase);
+
+                    if (isRight && isHand)
                     {
                         manager.RightHand = obj.transform;
                         break;
                     }
                 }
             }
-
-            return b;
         }
 #endif
 
-        /// <summary>
-        /// Connects to Photon using the specified AppId and VoiceAppId
-        /// </summary>
+        private void LoadSavedLocalSettings()
+        {
+            string savedUsername = PlayerPrefs.GetString("Username");
+
+            if (string.IsNullOrWhiteSpace(savedUsername) && !string.IsNullOrWhiteSpace(DefaultUsername))
+                savedUsername = $"{DefaultUsername}{GenerateRoomCode()}";
+
+            if (!string.IsNullOrWhiteSpace(savedUsername))
+                SetUsername(savedUsername);
+
+            string savedColour = PlayerPrefs.GetString("Colour");
+            if (!string.IsNullOrWhiteSpace(savedColour))
+                SetColour(JsonUtility.FromJson<Color>(savedColour));
+
+            Cosmetics = FusionVRPrefs.GetCosmetics(CosmeticSlots) ?? new Dictionary<string, string>();
+        }
+
         public static bool Connect()
         {
+            return Connect(Manager != null && Manager.JoinRoomOnConnect);
+        }
+
+        public static bool Connect(bool joinDefaultRoom)
+        {
+            if (Manager == null)
+            {
+                Debug.LogError("FusionVRManager is missing.");
+                return false;
+            }
+
             if (Manager.Runner != null)
             {
-                Debug.LogError("Already connected to server");
+                Debug.LogWarning("FusionVR already has a runner.", Manager);
                 return false;
             }
 
-            if (string.IsNullOrEmpty(Manager.FusionAppId))
+            if (!ValidateManagerForConnection())
+                return false;
+
+            GameObject runnerObject;
+
+            if (Manager.VoiceAndRunner != null)
             {
-                Debug.LogError("Please input an app id");
+                runnerObject = Instantiate(Manager.VoiceAndRunner);
+                runnerObject.name = $"{Manager.VoiceAndRunner.name} (Runtime)";
+            }
+            else
+            {
+                runnerObject = new GameObject("FusionVR Runner (Runtime)");
+            }
+
+            DontDestroyOnLoad(runnerObject);
+
+            NetworkRunner runner = runnerObject.GetComponent<NetworkRunner>();
+            if (runner == null)
+                runner = runnerObject.AddComponent<NetworkRunner>();
+
+            FusionVRRunner callbacks = runnerObject.GetComponent<FusionVRRunner>();
+            if (callbacks == null)
+                callbacks = runnerObject.AddComponent<FusionVRRunner>();
+
+            runner.AddCallbacks(callbacks);
+            runner.ProvideInput = true;
+
+            if (NetworkProjectConfig.Global != null)
+                NetworkProjectConfig.Global.Simulation.HostMigration = Manager.EnableHostMigration;
+
+            Manager.Runner = runner;
+            Manager.VoiceClient = FindOptionalVoiceClient(runnerObject);
+
+            if (!string.IsNullOrWhiteSpace(Manager.VoiceAppId) && Manager.VoiceClient == null)
+            {
+                Debug.LogWarning(
+                    "A Voice App ID is assigned, but FusionVoiceClient is not present. " +
+                    "Fusion networking will continue without voice.",
+                    runnerObject
+                );
+            }
+
+            Debug.Log("FusionVR runner created. Fusion App settings are loaded from Fusion Hub.", runnerObject);
+
+            if (joinDefaultRoom)
+                _ = JoinRandomRoom(Manager.DefaultQueue, Manager.DefaultRoomLimit);
+
+            return true;
+        }
+
+        private static bool ValidateManagerForConnection()
+        {
+            if (Manager.Head == null || Manager.LeftHand == null || Manager.RightHand == null)
+            {
+                Debug.LogError("Assign the local Head, LeftHand, and RightHand transforms before connecting.", Manager);
                 return false;
             }
 
-            GameObject voiceAndRunner = Instantiate(Manager.VoiceAndRunner);
-
-            NetworkProjectConfig.Global.EnableHostMigration = true;
-            NetworkProjectConfig.Global.HostMigrationSnapshotInterval = 5;
-            Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdFusion = Manager.FusionAppId;
-            Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdVoice = Manager.VoiceAppId;
-
-            if (!string.IsNullOrEmpty(Manager.Region))
-                Photon.Realtime.PhotonAppSettings.Instance.AppSettings.FixedRegion = Manager.Region;
-
-            //Manager.State = ConnectionState.Connecting;
-            Manager.Runner = voiceAndRunner.GetComponent<NetworkRunner>();
-            Manager.Runner.ProvideInput = true;
-
-            if (!string.IsNullOrEmpty(Manager.VoiceAppId))
+            if (!Manager.NetworkedPlayerPrefab.IsValid)
             {
-                Manager.VoiceClient = voiceAndRunner.GetComponent<FusionVoiceClient>();
-            }
-
-            Debug.Log($"Connected - FusionAppId: {Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdFusion} VoiceAppId: {Photon.Realtime.PhotonAppSettings.Instance.AppSettings.AppIdVoice}");
-
-            if (Manager.JoinRoomOnConnect)
-            {
-                Debug.Log("Joining room on connect");
-                JoinRandomRoom(Manager.DefaultQueue, Manager.DefaultRoomLimit);
+                Debug.LogError("Assign and bake the networked Player prefab on FusionVRManager.", Manager);
+                return false;
             }
 
             return true;
         }
 
-        /// <summary>
-        /// Sets the Fusion nickname to something
-        /// </summary>
-        /// <param name="Name">The string you want the Fusion nickname to be</param>
-        public static void SetUsername(string Name)
+        private static Component FindOptionalVoiceClient(GameObject runnerObject)
         {
-            int maxNameLenght = 32;
-            if (Name.Length > maxNameLenght)
-                Name = Name.Substring(0, maxNameLenght); // Just in case somebody is trying to set the entire 
-            if (FusionVRPlayer.localPlayer != null)
+            Component[] components = runnerObject.GetComponentsInChildren<Component>(true);
+
+            foreach (Component component in components)
             {
-                if (FusionVRPlayer.localPlayer.NickName != Name)
-                    FusionVRPlayer.localPlayer.RPCSetNickName(Name);
-                else
-                {
-                    // Sleeep
-                    Debug.LogWarning("NickName was not set, due to the attempted nickname being the same as the current nickname.\nThis is to save on bandwidth");
-                    return;
-                }
-            }
-            PlayerPrefs.SetString("Username", Name);
-
-            Debug.Log($"Set username to {Name}");
-        }
-
-        /// <summary>
-        /// Sets the colour
-        /// </summary>
-        /// <param name="PlayerColour">The colour you want the player to be</param>
-        public static void SetColour(Color PlayerColour)
-        {
-            Manager.Colour = PlayerColour;
-
-            if (FusionVRPlayer.localPlayer != null)
-            {
-                if (FusionVRPlayer.localPlayer.Colour != PlayerColour)
-                    FusionVRPlayer.localPlayer.RPCSetColour(PlayerColour);
-                else
-                {
-                    // This is virtually meaningless, but it gives me sleep at night
-                    Debug.LogWarning("Colour was not set, due to the attempted colour being the same as the current colour.\nThis is to save on bandwidth");
-                    return;
-                }
+                if (component != null && component.GetType().FullName == FusionVoiceClientTypeName)
+                    return component;
             }
 
-            PlayerPrefs.SetString("Colour", JsonUtility.ToJson(PlayerColour));
-
-            Debug.Log($"Set colour to {JsonUtility.ToJson(PlayerColour)}");
+            return null;
         }
 
-        /// <summary>
-        /// Sets the cosmetics
-        /// </summary>
-        /// <param name="SlotName">The name of the slot you would like to put the cosmetic on</param>
-        /// <param name="CosmeticName">The cosmetics you want to set</param>
-        public static void SetCosmetics(string SlotName, string CosmeticName)
+        public static Task<bool> JoinRandomRoom(string queue, int maxPlayers)
         {
-            Manager.Cosmetics[SlotName] = CosmeticName;
-
-            if (FusionVRPlayer.localPlayer != null)
-                FusionVRPlayer.localPlayer.RPCSetCosmetics(CosmeticSlot.CopyFrom(Manager.Cosmetics).ToArray());
-
-            FusionVRPrefs.SaveCosmetics(Manager.Cosmetics);
-
-            Debug.Log("Set cosmetics");
+            string roomName = string.IsNullOrWhiteSpace(queue) ? "Default" : queue.Trim();
+            return StartSession(roomName, maxPlayers, true);
         }
 
-        /// <summary>
-        /// Sets the cosmetics
-        /// </summary>
-        /// <param name="PlayerCosmetics">The cosmetics you want to set</param>
-        public static void SetCosmetics(Dictionary<string, string> PlayerCosmetics)
+        public static Task<bool> JoinRandomRoom(string queue)
         {
-            Manager.Cosmetics = PlayerCosmetics;
-
-            if (FusionVRPlayer.localPlayer != null)
-                FusionVRPlayer.localPlayer.RPCSetCosmetics(CosmeticSlot.CopyFrom(Manager.Cosmetics).ToArray());
-
-            FusionVRPrefs.SaveCosmetics(Manager.Cosmetics);
-
-            Debug.Log("Set cosmetics");
+            return JoinRandomRoom(queue, Manager != null ? Manager.DefaultRoomLimit : 6);
         }
 
-        /// <summary>
-        /// Checks if the player has a specefic cosmetic on
-        /// </summary>
-        /// <param name="SlotName">The name of the slot you would like to check</param>
-        /// <param name="CosmeticName">The cosmetic you would like to check</param>
-        /// <returns>If the player has the specified cosmetic on</returns>
-        public static bool HasCosmeticOn(string SlotName, string CosmeticName)
+        public static Task<bool> _JoinRandomRoom(string queue, int maxPlayers)
         {
-            foreach (KeyValuePair<string, string> slot in Manager.Cosmetics)
+            return JoinRandomRoom(queue, maxPlayers);
+        }
+
+        public static Task<bool> JoinPrivateRoom(string roomId, int maxPlayers)
+        {
+            return StartSession(roomId, maxPlayers, false);
+        }
+
+        public static Task<bool> JoinPrivateRoom(string roomId)
+        {
+            return JoinPrivateRoom(roomId, Manager != null ? Manager.DefaultRoomLimit : 6);
+        }
+
+        public static Task<bool> _JoinPrivateRoom(string roomCode, int maxPlayers)
+        {
+            return JoinPrivateRoom(roomCode, maxPlayers);
+        }
+
+        private static async Task<bool> StartSession(string roomName, int maxPlayers, bool isPublicQueue)
+        {
+            if (Manager == null || IsSessionOperationInProgress)
+                return false;
+
+            if (Manager.Runner == null && !Connect(false))
+                return false;
+
+            if (Manager.Runner.IsRunning)
             {
-                if (slot.Key == SlotName)
-                {
-                    return slot.Value == CosmeticName;
-                }
+                Debug.LogWarning("FusionVR is already inside a session.");
+                return false;
             }
 
-            return false;
+            if (string.IsNullOrWhiteSpace(roomName))
+                roomName = "Default";
+
+            IsSessionOperationInProgress = true;
+            NetworkRunner runner = Manager.Runner;
+
+            try
+            {
+                Dictionary<string, SessionProperty> properties = new Dictionary<string, SessionProperty>
+                {
+                    ["version"] = Application.version,
+                    ["queue"] = isPublicQueue ? roomName : "private"
+                };
+
+                StartGameArgs args = new StartGameArgs
+                {
+                    GameMode = Manager.NetworkingMode,
+                    SessionName = roomName,
+                    SessionProperties = properties,
+                    PlayerCount = Mathf.Clamp(maxPlayers, 1, 100),
+                    IsOpen = true,
+                    IsVisible = isPublicQueue,
+                    EnableClientSessionCreation = true
+                };
+
+                StartGameResult result = await runner.StartGame(args);
+
+                if (!result.Ok)
+                {
+                    Debug.LogError($"FusionVR failed to start session: {result.ShutdownReason}");
+                    DestroyRunner(runner);
+                    return false;
+                }
+
+                Debug.Log($"FusionVR joined '{roomName}' as {runner.GameMode}.");
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                DestroyRunner(runner);
+                return false;
+            }
+            finally
+            {
+                IsSessionOperationInProgress = false;
+            }
         }
 
-        /// <summary>
-        /// Disconnects from the Fusion servers
-        /// </summary>
         public static bool Disconnect()
         {
-            Manager.Runner.Disconnect(Manager.Runner.LocalPlayer);
+            if (Manager == null || Manager.Runner == null || IsSessionOperationInProgress)
+                return false;
+
+            _ = LeaveRoomAsync();
             return true;
         }
-
-        #region Join publics
-        /// <summary>
-        /// Joins a room
-        /// </summary>
-        public static async Task<bool> JoinRandomRoom(string Queue, int MaxPlayers)
-        {
-            return await _JoinRandomRoom(Queue, MaxPlayers);
-        }
-
-        /// <summary>
-        /// Joins a room
-        /// </summary>
-        public static async Task<bool> JoinRandomRoom(string Queue)
-        {
-            return await _JoinRandomRoom(Queue, Manager.DefaultRoomLimit);
-        }
-
-        public static async Task<bool> _JoinRandomRoom(string queue, int maxPlayers)
-        {
-            if (Manager.Runner == null)
-                Connect();
-            else
-                Debug.Log($"Runner state: {Manager.Runner.State}");
-
-            Dictionary<string, SessionProperty> roomProperties = new Dictionary<string, SessionProperty>();
-            roomProperties.Add("queue", queue);
-            roomProperties.Add("version", Application.version); // So we don't join players across different versions
-
-            Manager.Runner.ProvideInput = true;
-
-            StartGameResult result = await Manager.Runner.StartGame(new StartGameArgs()
-            {
-                GameMode = Manager.NetworkingMode,
-                SessionProperties = roomProperties,
-                PlayerCount = maxPlayers,
-                SceneManager = Manager.gameObject.AddComponent<NetworkSceneManagerDefault>()
-            });
-
-            if (!result.Ok)
-                Debug.LogError("Failed to join room");
-            else
-                Debug.Log($"Joined a room");
-
-            return result.Ok;
-        }
-        #endregion
-
-        #region Join privates
-
-        /// <summary>
-        /// Joins a private room
-        /// </summary>
-        /// <param name="RoomId">The room code</param>
-        /// <param name="MaxPlayers">The maximum amount of players that can be in the room</param>
-        public static async Task<bool> JoinPrivateRoom(string RoomId, int MaxPlayers)
-        {
-            return await _JoinPrivateRoom(RoomId, MaxPlayers);
-        }
-
-        /// <summary>
-        /// Joins a private room
-        /// </summary>
-        /// <param name="RoomId">The room code</param>
-        /// <param name="MaxPlayers">The maximum amount of players that can be in the room</param>
-        public static async Task<bool> JoinPrivateRoom(string RoomId)
-        {
-            return await _JoinPrivateRoom(RoomId, Manager.DefaultRoomLimit);
-        }
-
-        public static async Task<bool> _JoinPrivateRoom(string roomCode, int maxPlayers)
-        {
-            if (Manager.Runner == null)
-                Connect();
-            else
-                Debug.Log($"Runner state: {Manager.Runner.State}");
-
-            Dictionary<string, SessionProperty> roomProperties = new Dictionary<string, SessionProperty>();
-            roomProperties.Add("version", Application.version); // So we don't join players across different versions
-
-            Manager.Runner.ProvideInput = true;
-
-            StartGameResult result = await Manager.Runner.StartGame(new StartGameArgs()
-            {
-                GameMode = Manager.NetworkingMode,
-                SessionProperties = roomProperties,
-                PlayerCount = maxPlayers,
-                SessionName = roomCode,
-                SceneManager = Manager.gameObject.AddComponent<NetworkSceneManagerDefault>()
-            });
-
-            if (!result.Ok)
-                Debug.LogError($"Failed to join room: {result.ShutdownReason}");
-            else
-                Debug.Log($"Joined {roomCode}");
-
-            return result.Ok;
-        }
-        #endregion
 
         public static void LeaveRoom()
         {
-            Manager.Runner.Shutdown(shutdownReason: ShutdownReason.Ok);
+            if (!IsSessionOperationInProgress)
+                _ = LeaveRoomAsync();
         }
 
-        /// <summary>
-        /// Generates a random room code
-        /// </summary>
-        /// <returns>A room code</returns>
-        public static string GenerateRoomCode()
+        public static async Task LeaveRoomAsync()
         {
-            return new System.Random().Next(99999).ToString();
+            if (Manager == null || Manager.Runner == null || IsSessionOperationInProgress)
+                return;
+
+            IsSessionOperationInProgress = true;
+            NetworkRunner runner = Manager.Runner;
+
+            try
+            {
+                if (runner.IsRunning)
+                    await runner.Shutdown(shutdownReason: ShutdownReason.Ok);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+            }
+            finally
+            {
+                DestroyRunner(runner);
+                IsSessionOperationInProgress = false;
+            }
         }
 
-        /// <summary>
-        /// Loads all saved player values
-        /// </summary>
+        private static void DestroyRunner(NetworkRunner runner)
+        {
+            if (Manager != null && Manager.Runner == runner)
+            {
+                Manager.Runner = null;
+                Manager.VoiceClient = null;
+                Manager.playerCache.Clear();
+            }
+
+            if (runner != null)
+                Destroy(runner.gameObject);
+        }
+
+        public static void SetUsername(string playerName)
+        {
+            if (Manager == null || string.IsNullOrWhiteSpace(playerName))
+                return;
+
+            playerName = playerName.Trim();
+            if (playerName.Length > 32)
+                playerName = playerName.Substring(0, 32);
+
+            if (FusionVRPlayer.localPlayer != null && FusionVRPlayer.localPlayer.NickName.ToString() != playerName)
+                FusionVRPlayer.localPlayer.RPCSetNickName(playerName);
+
+            PlayerPrefs.SetString("Username", playerName);
+            PlayerPrefs.Save();
+        }
+
+        public static void SetColour(Color playerColour)
+        {
+            if (Manager == null)
+                return;
+
+            Manager.Colour = playerColour;
+
+            if (FusionVRPlayer.localPlayer != null && FusionVRPlayer.localPlayer.Colour != playerColour)
+                FusionVRPlayer.localPlayer.RPCSetColour(playerColour);
+
+            PlayerPrefs.SetString("Colour", JsonUtility.ToJson(playerColour));
+            PlayerPrefs.Save();
+        }
+
+        public static void SetCosmetics(string slotName, string cosmeticName)
+        {
+            if (Manager == null || string.IsNullOrWhiteSpace(slotName))
+                return;
+
+            Manager.Cosmetics[slotName] = cosmeticName ?? string.Empty;
+            SendCosmeticsToLocalPlayer();
+        }
+
+        public static void SetCosmetics(Dictionary<string, string> playerCosmetics)
+        {
+            if (Manager == null)
+                return;
+
+            Manager.Cosmetics = playerCosmetics != null
+                ? new Dictionary<string, string>(playerCosmetics)
+                : new Dictionary<string, string>();
+
+            SendCosmeticsToLocalPlayer();
+        }
+
+        private static void SendCosmeticsToLocalPlayer()
+        {
+            if (Manager == null)
+                return;
+
+            if (FusionVRPlayer.localPlayer != null)
+                FusionVRPlayer.localPlayer.RPCSetCosmetics(CosmeticSlot.CopyFrom(Manager.Cosmetics).ToArray());
+
+            FusionVRPrefs.SaveCosmetics(Manager.Cosmetics);
+        }
+
+        public static bool HasCosmeticOn(string slotName, string cosmeticName)
+        {
+            return Manager != null &&
+                   Manager.Cosmetics.TryGetValue(slotName, out string selectedCosmetic) &&
+                   selectedCosmetic == cosmeticName;
+        }
+
         public static void LoadPlayer()
         {
-            Debug.Log("I own player - setting values");
-            SetUsername(PlayerPrefs.GetString("Username"));
-            SetColour(Manager.Colour);
-            SetCosmetics(Manager.Cosmetics);
+            if (Manager == null)
+                return;
+
+            string savedUsername = PlayerPrefs.GetString("Username");
+            if (!string.IsNullOrWhiteSpace(savedUsername))
+                SetUsername(savedUsername);
+
+            string savedColour = PlayerPrefs.GetString("Colour");
+            if (!string.IsNullOrWhiteSpace(savedColour))
+                SetColour(JsonUtility.FromJson<Color>(savedColour));
+
+            SetCosmetics(FusionVRPrefs.GetCosmetics(Manager.CosmeticSlots));
+        }
+
+        public static string GenerateRoomCode()
+        {
+            return UnityEngine.Random.Range(10000, 100000).ToString();
         }
     }
 }
